@@ -1,0 +1,495 @@
+/**** Start of imports. If edited, may not auto-convert in the playground. ****/
+var aoi = 
+    /* color: #98ff00 */
+    /* shown: false */
+    ee.Geometry({
+      "type": "GeometryCollection",
+      "geometries": [
+        {
+          "type": "Polygon",
+          "coordinates": [
+            [
+              [
+                84.11244164360056,
+                24.857470953608917
+              ],
+              [
+                84.17217980278025,
+                24.803878590768978
+              ],
+              [
+                84.26762352836619,
+                24.91290837472158
+              ],
+              [
+                84.32255516899119,
+                24.97267812428995
+              ],
+              [
+                84.39190636528025,
+                25.01686416693471
+              ],
+              [
+                84.46263085258494,
+                25.070985952132904
+              ],
+              [
+                84.47842369926462,
+                25.12073201371901
+              ],
+              [
+                84.5045162285615,
+                25.161135784588613
+              ],
+              [
+                84.5924068535615,
+                25.199041000290737
+              ],
+              [
+                84.67068444145212,
+                25.226996304236096
+              ],
+              [
+                84.61643944633494,
+                25.26674389105756
+              ],
+              [
+                84.53404198539744,
+                25.239418821811256
+              ],
+              [
+                84.45439110649119,
+                25.212708840145837
+              ],
+              [
+                84.411132439499,
+                25.15678525182303
+              ],
+              [
+                84.39671288383494,
+                25.105188542643464
+              ],
+              [
+                84.35139428031931,
+                25.067876151819696
+              ],
+              [
+                84.27037011039744,
+                25.01810861408956
+              ],
+              [
+                84.20307885063181,
+                24.93408014389453
+              ]
+            ]
+          ],
+          "evenOdd": true
+        },
+        {
+          "type": "Point",
+          "coordinates": [
+            84.48445150691536,
+            25.17210030244072
+          ]
+        }
+      ],
+      "coordinates": []
+    });
+/***** End of imports. If edited, may not auto-convert in the playground. *****/
+// var aoi=ee.FeatureCollection("users/andoshah/PL_NR").first().geometry();
+// Zoom to regions of interest
+Map.centerObject(aoi, 13);
+
+// Import Sentinel 1 and filter data series:
+var s1 =  ee.ImageCollection('COPERNICUS/S1_GRD')
+  .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VV'))
+  .filter(ee.Filter.eq('instrumentMode', 'IW'))
+  .filter(ee.Filter.eq('orbitProperties_pass', 'ASCENDING'))
+  .filterBounds(aoi)
+  //.filterBounds(Map.getBounds(true))
+.filterDate('2022-11-13','2022-12-31')
+  .filter(ee.Filter.contains({leftField: ".geo", rightValue: aoi})) // Filter partial S1-Images of AOI
+  .map(function(image){return image.clip(Map.getBounds(true))})
+  .map(function(image){return image.addBands(image.select('VV').focal_median(parseFloat('50'),'circle','meters').rename('VV_smoothed'))}); // Smooth S1-Images
+
+print(s1); //print to get information about the collection
+
+
+
+//Calculate median image of time period
+var image = ee.Image(s1.median()); // convert collection to median image (i.e., median VV backscatter over time)
+print(image);
+
+// Define visualization parameters in an object literal.
+var s1_band = 'VV';
+var s1_band2 = 'VH'
+var s1_band3 = 'angle'
+
+var vizParams = {
+  bands: [s1_band, s1_band2, s1_band3],
+  min: -28,
+  max: 0,
+};
+
+
+
+// Display S1-Image
+// Map.addLayer(image, vizParams, 'S1-Image');
+
+// Compute the histogram of the VV-band.  The mean and variance are only for our information:
+var histogram = image.clip(aoi).select(s1_band).reduceRegion({
+  reducer: ee.Reducer.histogram()
+      .combine('mean', null, true)
+      .combine('variance', null, true), 
+  geometry: aoi, 
+  scale: 10,
+ bestEffort: true,
+  maxPixels: 1e10
+});
+print(histogram); //this just prints histogram description
+
+// Chart the histogram to show as a graph:
+// print(Chart.image.histogram(image.select(s1_band), aoi, 10));
+// print(Chart.image.histogram(image.select(s1_band2), aoi, 10));
+
+
+//Now add the S-2 images
+function maskS2clouds(image) {
+  var qa = image.select('QA60');
+
+  // Bits 10 and 11 are clouds and cirrus, respectively.
+  var cloudBitMask = 1 << 10;
+  var cirrusBitMask = 1 << 11;
+
+  // Both flags should be set to zero, indicating clear conditions.
+  var mask = qa.bitwiseAnd(cloudBitMask).eq(0)
+      .and(qa.bitwiseAnd(cirrusBitMask).eq(0));
+
+  return image.updateMask(mask).divide(10000);
+}
+
+var s2Collection = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
+                  .filterDate('2022-11-13','2022-12-31')
+                  // Pre-filter to get less cloudy granules.
+                  .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE',15))
+                  .map(maskS2clouds);
+                  
+print(s2);
+var s2 = s2Collection.median();
+
+var visualization = {
+  min: 0.0,
+  max: 0.3,
+  bands: ['B4', 'B3', 'B2'],
+};
+
+// Map.setCenter(83.277, 17.7009, 12);
+
+Map.addLayer(s2, visualization, 'S2-RGB');
+
+// Map.addLayer(s2, {min: 0.0, max: 0.3, bands: ['B4', 'B8', 'B12'],}, 'S2-R-NIR-SWIR2');
+// Map.addLayer(s2, {min: 0.0, max: 0.3, bands: ['B4', 'B11', 'B12'],}, 'S2-R-SWIR1-SWIR2');
+
+//Create TGSI
+var namedVarsExp = '(R - B) / (R + G + B)';
+var TGSI_s2 = ee.Image().expression({
+  expression: namedVarsExp,
+  map: 
+    { 'R': s2.select('B4'),
+      'G': s2.select('B3'),
+      'B': s2.select('B2'),
+    }
+}).rename('TGSI');
+
+s2 = s2.addBands(TGSI_s2);
+
+//Modified TGSI
+var namedVarsExp = '(R - B + SWIR2 - NIR) / (R + G + B + SWIR2 + NIR)';
+// var namedVarsExp = '(R - B + SWIR1 - SWIR2 - NIR) / (R + G + B + SWIR1 + SWIR2 + NIR)';
+var mTGSI_s2 = ee.Image().expression({
+  expression: namedVarsExp,
+  map: 
+    { 'R': s2.select('B4'),
+      'G': s2.select('B3'),
+      'B': s2.select('B2'),
+      'NIR': s2.select('B8'),
+      'SWIR2': s2.select('B12'),
+      'SWIR1': s2.select('B11')
+    }
+}).rename('mTGSI');
+
+s2 = s2.addBands(mTGSI_s2);
+print(s2);
+
+
+var viridis = ['#440154', '#3b528b', '#21918c', '#5ec962', '#fde725']; 
+var blue_yellow = ['#0000FF','#FFFF31']
+var blue_yellow_orange = ['#0000FF','#2c7873','#FFFF31','#f85d31']
+var green_blue_yellow_orange = ['#008080','#0039e6','#FFFF31','#f85d31']
+
+var vizParamsTGSI = {bands: ['TGSI'], min: -0.05, max: 0.3, palette: green_blue_yellow_orange};
+var vizParams_mTGSI = {bands: ['mTGSI'], min: -0.45, max: 0.25, palette: green_blue_yellow_orange};
+
+
+// Map.addLayer(TGSI_s2, vizParamsTGSI, 'TGSI'); 
+// Map.addLayer(mTGSI_s2, vizParams_mTGSI, 'mTGSI'); 
+
+
+print(Chart.image.histogram(TGSI_s2.select('TGSI'), aoi, 10));
+print(Chart.image.histogram(mTGSI_s2.select('mTGSI'), aoi, 10));
+
+
+
+
+/* -- Code from GEE Fundamentals Book --- */
+// Define a reducer to calculate a histogram of values.
+// var histogramReducer = ee.Reducer.histogram(255, 0.1);
+// var histogramReducer2 = ee.Reducer.histogram(255, 2)
+//                           .combine('mean', null, true)
+//                           .combine('variance', null, true);
+
+// var band = 'mTGSI';
+
+// // Reduce all of the image values.
+// var globalHistogram = ee.Dictionary(
+//     s2.select(band).clip(aoi).reduceRegion({
+//         reducer: histogramReducer,
+//         geometry: aoi,
+//         scale: 10,
+//         bestEffort: true,
+//         //maxPixels: 1e10
+//     }).get(band)
+// );
+
+// var histogram = ee.Dictionary(
+//   s2.select(band).reduceRegion({
+//     reducer: ee.Reducer.histogram(255, 2)
+//       .combine('mean', null, true)
+//       .combine('variance', null, true), 
+//     geometry: aoi, 
+//     scale: 10,
+//     bestEffort: true
+//   }).get(band)
+// );
+
+// print(globalHistogram);
+
+// function otsu(histogram) {
+//     // Make sure histogram is an ee.Dictionary object.
+//     // histogram = ee.Dictionary(histogram);
+//     // Extract relevant values into arrays.
+//     var counts = ee.Array(histogram.get('histogram'));
+//     var means = ee.Array(histogram.get('bucketMeans'));
+//     // Calculate single statistics over arrays
+//     var size = means.length().get([0]);
+//     var total = counts.reduce(ee.Reducer.sum(), [0]).get([0]);
+//     var sum = means.multiply(counts).reduce(ee.Reducer.sum(), [0])
+//         .get([0]);
+//     var mean = sum.divide(total);
+//     // Compute between sum of squares, where each mean partitions the data.
+//     var indices = ee.List.sequence(1, size);
+//     var bss = indices.map(function(i) {
+//         var aCounts = counts.slice(0, 0, i);
+//         var aCount = aCounts.reduce(ee.Reducer.sum(), [0])
+//             .get([0]);
+//         var aMeans = means.slice(0, 0, i);
+//         var aMean = aMeans.multiply(aCounts)
+//             .reduce(ee.Reducer.sum(), [0]).get([0])
+//             .divide(aCount);
+//         var bCount = total.subtract(aCount);
+//         var bMean = sum.subtract(aCount.multiply(aMean))
+//             .divide(bCount);
+//         return aCount.multiply(aMean.subtract(mean).pow(2))
+//             .add(
+//                 bCount.multiply(bMean.subtract(mean).pow(2)));
+//     });
+//     // Return the mean value corresponding to the maximum BSS.
+//     return means.sort(bss).get([-1]);
+// }
+
+// // Apply otsu thresholding.
+// var globalThreshold = otsu(globalHistogram);
+// // var Threshold = otsu(histogram);
+// print('Global threshold value:', globalThreshold);
+
+
+
+/* ---- OTSU from ARS Labs -----*/
+// Return the DN that maximizes interclass variance in S1-band (in the region).
+var otsu = function(histogram) {
+
+  var counts = ee.Array(ee.Dictionary(histogram).get('histogram'));
+  var means = ee.Array(ee.Dictionary(histogram).get('bucketMeans'));
+  var size = means.length().get([0]);
+  var total = counts.reduce(ee.Reducer.sum(), [0]).get([0]);
+  var sum = means.multiply(counts).reduce(ee.Reducer.sum(), [0]).get([0]);
+  var mean = sum.divide(total);
+  
+  var indices = ee.List.sequence(1, size);
+  print('histogram size: ', size);
+  
+// Compute between sum of squares, where each mean partitions the data.
+  var bss = indices.map(function(i) {
+    var aCounts = counts.slice(0, 0, i);
+    var aCount = aCounts.reduce(ee.Reducer.sum(), [0]).get([0]);
+    var aMeans = means.slice(0, 0, i);
+    var aMean = aMeans.multiply(aCounts)
+        .reduce(ee.Reducer.sum(), [0]).get([0])
+        .divide(aCount);
+    var bCount = total.subtract(aCount);
+    var bMean = sum.subtract(aCount.multiply(aMean)).divide(bCount);
+    return aCount.multiply(aMean.subtract(mean).pow(2)).add(
+          bCount.multiply(bMean.subtract(mean).pow(2)));
+  });
+  print('All BSS: \n', bss);
+  
+// Return the mean value corresponding to the maximum BSS.
+  return means.sort(bss).get([-1]);
+
+};
+
+// custom function to threshold and return image with water mask as additional band
+var add_sandMask = function(image){
+
+  // Compute histogram
+  var histogram = image.select('mTGSI').reduceRegion({
+    reducer: ee.Reducer.histogram(255, 0.2)
+      .combine('mean', null, true)
+      .combine('variance', null, true),
+    geometry: aoi, 
+    scale: 10,
+    maxPixels: 1e10,
+    bestEffort: true
+  });
+  
+  print(histogram);
+
+  // Calculate threshold via function otsu (see before)
+  var threshold = otsu(histogram.get('mTGSI_histogram')); 
+  
+  print("Otsu threshold = ", threshold)
+  
+  // get watermask
+  var sandMask = image.select('mTGSI').lt(threshold).rename('sandMask');
+  sandMask = sandMask.updateMask(sandMask); //Remove all pixels equal to 0
+  return image.addBands(sandMask);
+
+};
+
+// Apply water mask function to pre-filtered Sentinel-1 image collection: 
+var mTGSI_s2_mask = add_sandMask(s2);
+
+Map.addLayer(mTGSI_s2_mask, {bands: ['sandMask'], palette:'black'}, 'sand_mask_otsu', false);
+
+
+/*-------------------------------------------------------------*/
+//Get Planet NICFI Data
+var nicfi = ee.ImageCollection('projects/planet-nicfi/assets/basemaps/asia')
+              .filterDate('2022-11-01','2022-12-31')
+              .filterBounds(aoi);
+              
+print(nicfi);
+
+// Filter basemaps by date and get the first image from filtered results
+var basemap = nicfi.first().clip(aoi);
+
+
+// print(Chart.image.histogram(basemap.select('R'), aoi, 10));
+// print(Chart.image.histogram(basemap.select('G'), aoi, 10));
+// print(Chart.image.histogram(basemap.select('B'), aoi, 10));
+// print(Chart.image.histogram(basemap.select('N'), aoi, 10));
+
+// Map.setCenter(107, 10, 4);
+
+var vis = {"bands":["R","G","B"],"min":64,"max":2500,"gamma":1.0};
+
+Map.addLayer(basemap, vis, 'NICFI mosaic', false);
+Map.addLayer(
+    basemap.normalizedDifference(['N','R']).rename('NDVI'),
+    {min:-1.0, max:1.0, palette: ['0000EE','FFFFFF' ,'00FF00']}, 
+    'NDVI', false);
+
+
+
+//Sentinel-based land cover
+// var dataset = ee.Image("COPERNICUS/Landcover/100m/Proba-V-C3/Global/2019")
+//                     .select('discrete_classification');
+                    
+// var lc = dataset.clip(aoi);
+
+
+// Map.addLayer(lc, {}, "Land Cover",false);
+
+//Experimental sand mask
+var threshold = 0.0;
+// var sand_mask = s2.select(['mTGSI_s2']).gt(threshold);
+// Map.addLayer(sand_mask.mask(sand_mask), {palette: 'yellow'}, 'sand_mask');
+
+var sandmask = function(image, band, min, max) {
+  var mask_band = image.select(band);
+  var mask = mask_band.lte(max).and(mask_band.gte(min)).not(); 
+  return image.mask(mask);
+  // return mask_band.mask(mask);
+};
+
+var sand_mask_mTGSI = sandmask(mTGSI_s2, 'mTGSI',0.13, 0.3);
+// var sand_mask_mTGSI = sandmask(mTGSI_s2, 'mTGSI',0.3, 0.5);
+var sand_mask_TGSI = sandmask(TGSI_s2, 'TGSI',0.15, 0.25);
+// var B5_smooth_land_mask = landmask(B5_smooth, 'B5', 0, 0.055);
+
+// Map.addLayer(sand_mask_TGSI, {bands: ['TGSI'], palette:'black'}, 'sand_mask_TGSI');
+Map.addLayer(sand_mask_mTGSI, {bands: ['mTGSI'], palette:'black'}, 'sand_mask_manual', false);
+
+// Map.addLayer(NDWI_smooth_land_mask,{bands:['B4','B3','B2'], min:0, max:0.3},'Landsat Masked');
+
+var cluster_image = mTGSI_s2.select('mTGSI').clip(aoi);
+// print(cluster_image);
+
+// Map.addLayer(cluster_image,{},'Clustered mTGSI');
+
+
+
+/* Now lets see if we can use k-means to cluster this layer*/
+// Get pixels from the image into a training sample (appropriate for unsupervised classification)
+var training = cluster_image.sample({
+  region: aoi,
+  scale: 10,
+  numPixels: 50000 //this is an approximate guess on how many pixels we can sample. should be <1 million; this number could be adjusted depending on how large the study area is
+});
+
+//(optional) check that we now have a set of 5000 training features:
+print(training)
+
+var n_clusters = 4;
+
+
+//Specify our clusterer using K-Means methods, our desired # clusters & earlier designated training sample 
+var clusterer = ee.Clusterer.wekaKMeans(n_clusters).train(training);
+//Apply clusterer to the image:
+var result_mTGSI = mTGSI_s2.select('mTGSI').cluster(clusterer);
+//visualize clusters using random colors:
+Map.addLayer(result_mTGSI.randomVisualizer(), {}, 'mTGSI clusters', false);
+
+//Make only sand (cluster #1) transparent
+var cluster_not1=result_mTGSI.remap([0,2,3],[0,2,3]); 
+Map.addLayer(cluster_not1, {palette:'black'}, 'sand_kmeans')
+
+
+
+/** RAW K-Mean on all bands of interest**/
+var training_image_s2 = s2.select(['B[2-4]','B8','B11','B12']).clip(aoi); 
+var training = training_image_s2.sample({
+  region: aoi,
+  scale: 10,
+  numPixels: 50000 //this is an approximate guess on how many pixels we can sample. should be <1 million; this number could be adjusted depending on how large the study area is
+});
+
+//Specify our clusterer using K-Means methods, our desired # clusters & earlier designated training sample 
+var clusterer = ee.Clusterer.wekaKMeans(n_clusters).train(training);
+//Apply clusterer to the image:
+var result_raw = s2.cluster(clusterer);
+//visualize clusters using random colors:
+Map.addLayer(result_raw.randomVisualizer(), {}, 'raw band clusters', false);
+//Make only sand (cluster #0) transparent
+var raw_cluster_not0=result_raw.remap([1,2,3],[1,2,3]); 
+Map.addLayer(raw_cluster_not0, {palette:'black'}, 'sand_kmeans_raw')

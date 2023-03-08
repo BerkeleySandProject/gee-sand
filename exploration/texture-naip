@@ -1,0 +1,21 @@
+var sand_data = ee.FeatureCollection('projects/gee-sand/assets/sandsnap');
+
+print(sand_data);
+
+// print(sand_data['lat']);
+
+Map.addLayer(sand_data,{},"sand");
+// Map.centerObject(sand_data.geometry)
+
+// var lat = sand_data.columns.get('City');
+// print(lat);
+
+var obj_id = ee.List(sand_data.aggregate_array('City'));
+print(obj_id);
+
+var len = obj_id.length();
+
+for (var i = 0; i < len; ++i) {
+  var m = obj_id.get(i);
+  print(m);
+}

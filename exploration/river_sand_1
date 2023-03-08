@@ -1,0 +1,234 @@
+/**** Start of imports. If edited, may not auto-convert in the playground. ****/
+var aoi = 
+    /* color: #98ff00 */
+    /* shown: false */
+    ee.Geometry.Polygon(
+        [[[84.11244164360056, 24.857470953608917],
+          [84.17217980278025, 24.803878590768978],
+          [84.26762352836619, 24.91290837472158],
+          [84.32255516899119, 24.97267812428995],
+          [84.39190636528025, 25.01686416693471],
+          [84.46263085258494, 25.070985952132904],
+          [84.47842369926462, 25.12073201371901],
+          [84.5045162285615, 25.161135784588613],
+          [84.5924068535615, 25.199041000290737],
+          [84.67068444145212, 25.226996304236096],
+          [84.61643944633494, 25.26674389105756],
+          [84.53404198539744, 25.239418821811256],
+          [84.45439110649119, 25.212708840145837],
+          [84.411132439499, 25.15678525182303],
+          [84.39671288383494, 25.105188542643464],
+          [84.35139428031931, 25.067876151819696],
+          [84.27037011039744, 25.01810861408956],
+          [84.20307885063181, 24.93408014389453]]]);
+/***** End of imports. If edited, may not auto-convert in the playground. *****/
+// var aoi=ee.FeatureCollection("users/andoshah/PL_NR").first().geometry();
+// Zoom to regions of interest
+Map.centerObject(aoi, 12);
+
+// Import Sentinel 1 and filter data series:
+var s1 =  ee.ImageCollection('COPERNICUS/S1_GRD')
+  .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VV'))
+  .filter(ee.Filter.eq('instrumentMode', 'IW'))
+  .filter(ee.Filter.eq('orbitProperties_pass', 'ASCENDING'))
+  .filterBounds(aoi)
+  //.filterBounds(Map.getBounds(true))
+.filterDate('2022-01-01','2022-12-31')
+  .filter(ee.Filter.contains({leftField: ".geo", rightValue: aoi})) // Filter partial S1-Images of AOI
+  .map(function(image){return image.clip(Map.getBounds(true))})
+  .map(function(image){return image.addBands(image.select('VV').focal_median(parseFloat('50'),'circle','meters').rename('VV_smoothed'))}); // Smooth S1-Images
+
+print(s1); //print to get information about the collection
+
+
+// Return the DN that maximizes interclass variance in S1-band (in the region).
+var otsu = function(histogram) {
+
+  var counts = ee.Array(ee.Dictionary(histogram).get('histogram'));
+  var means = ee.Array(ee.Dictionary(histogram).get('bucketMeans'));
+  var size = means.length().get([0]);
+  var total = counts.reduce(ee.Reducer.sum(), [0]).get([0]);
+  var sum = means.multiply(counts).reduce(ee.Reducer.sum(), [0]).get([0]);
+  var mean = sum.divide(total);
+  
+  var indices = ee.List.sequence(1, size);
+  
+// Compute between sum of squares, where each mean partitions the data.
+  var bss = indices.map(function(i) {
+    var aCounts = counts.slice(0, 0, i);
+    var aCount = aCounts.reduce(ee.Reducer.sum(), [0]).get([0]);
+    var aMeans = means.slice(0, 0, i);
+    var aMean = aMeans.multiply(aCounts)
+        .reduce(ee.Reducer.sum(), [0]).get([0])
+        .divide(aCount);
+    var bCount = total.subtract(aCount);
+    var bMean = sum.subtract(aCount.multiply(aMean)).divide(bCount);
+    return aCount.multiply(aMean.subtract(mean).pow(2)).add(
+           bCount.multiply(bMean.subtract(mean).pow(2)));
+  });
+  
+// Return the mean value corresponding to the maximum BSS.
+  return means.sort(bss).get([-1]);
+
+};
+
+
+//Vizualize one of the images:
+var vizParams = {
+  bands: 'VV',//, s1_band, s1_band],
+  min: -20,
+  max: 0,
+};
+
+
+
+// Display S1-Image
+// Map.addLayer(s1.first(), vizParams, 'S1-Image');
+
+// custom function to threshold and return image with water mask as additional band
+var add_waterMask = function(image){
+
+  // Compute histogram
+  var histogram = image.select('VV').reduceRegion({
+    reducer: ee.Reducer.histogram(255, 2)
+      .combine('mean', null, true)
+      .combine('variance', null, true), 
+    geometry: aoi, 
+    scale: 10,
+    bestEffort: true
+  });
+
+  // Calculate threshold via function otsu (see before)
+  var threshold = otsu(histogram.get('VV_histogram')); 
+  
+  // get watermask
+  var waterMask = image.select('VV_smoothed').lt(threshold).rename('waterMask');
+  waterMask = waterMask.updateMask(waterMask); //Remove all pixels equal to 0
+  return image.addBands(waterMask);
+
+};
+
+// Apply water mask function to pre-filtered Sentinel-1 image collection: 
+s1 = s1.map(add_waterMask);
+
+
+// Define a minimum occurrence
+var min_occurence = 10; // we can try different values here:
+
+// Sum all watermask values for each pixel, then convert them to percentages:
+var water_sum = s1.select('waterMask').reduce(ee.Reducer.sum()); 
+var water_frequency = water_sum.divide(s1.select('waterMask').size()).multiply(100); 
+
+// Create new mask including values greater than minimum occurrence for display purposes, to exclude areas that are barely flooded:
+var water_frequency_masked = water_frequency.updateMask(water_frequency.gt(min_occurence)); 
+
+// Add the S1 imagery layer to the map
+Map.addLayer(s1.median(),
+  {bands: ['VV','VV','VV'], min: -20, max: 0,}, 
+  'S1-image [median]');
+  
+//Show only one band, but the smoothed version
+Map.addLayer(s1.first(),
+  {bands: ['VV_smoothed','VV_smoothed','VV_smoothed'], min: -20, max: 0,}, 
+  'S1-image [single]');
+
+// Define the color palette to use for water frequency
+// viridis palette: https://waldyrious.net/viridis-palette-generator/
+var mypalette = ['#440154', '#3b528b', '#21918c', '#5ec962', '#fde725']; // you can use more colors
+
+// Add the water frequency layer to the map using the defined color palette
+Map.addLayer(water_frequency_masked, 
+  {min: min_occurence, max: 100, palette: mypalette},
+  'Percentage of annual water occurrence');
+
+
+//This bit is to get a nice legend:
+// Define a function to create a color bar for a list of colors
+function ColorBar(palette) {
+  return ui.Thumbnail({
+    image: ee.Image.pixelLonLat().select(0),
+    params: {
+      bbox: [0, 0, 1, 0.1],
+      dimensions: '300x15',
+      format: 'png',
+      min: 0,
+      max: 1,
+      palette: palette,
+    },
+    style: {stretch: 'horizontal', margin: '0px 22px'},
+  });
+}
+
+// Define a function to create the legend overlay containing the colorbar
+function makeLegend(lowLine, midLine, highLine,lowText, midText, highText, palette) {
+  var  labelheader = ui.Label('Water occurrence during investigation period',{margin: '5px 17px', textAlign: 'center', stretch: 'horizontal', fontWeight: 'bold'});
+  var labelLines = ui.Panel(
+      [
+        ui.Label(lowLine, {margin: '-4px 21px'}),
+        ui.Label(midLine, {margin: '-4px 0px', textAlign: 'center', stretch: 'horizontal'}),
+        ui.Label(highLine, {margin: '-4px 21px'})
+      ],
+      ui.Panel.Layout.flow('horizontal'));
+      var labelPanel = ui.Panel(
+      [
+        ui.Label(lowText, {margin: '0px 14.5px'}),
+        ui.Label(midText, {margin: '0px 0px', textAlign: 'center', stretch: 'horizontal'}),
+        ui.Label(highText, {margin: '0px 1px'})
+      ],
+      ui.Panel.Layout.flow('horizontal'));
+    return ui.Panel({
+      widgets: [labelheader, ColorBar(palette), labelLines, labelPanel], 
+      style: {position:'bottom-left'}});
+}
+
+// Use the makeLegend function to add the legend to the map
+Map.add(makeLegend('|', '|', '|', "0 %", '50 %', '100%', mypalette));
+
+//Legend done, foooof
+
+
+//TIMELAPSE!
+
+// Define the time-lapse animation
+var timelapse = {
+  bands: ["VV","VV","VV"],
+  region: aoi,
+  min: -20,
+  max: 0,
+  framesPerSecond: 1};
+  
+var animation = ui.Thumbnail({
+  image: s1,
+  params: timelapse,
+  style: {
+    position: 'bottom-left',
+    width: '500px',
+  }});
+
+// Add the animation to the map
+Map.add(animation);
+
+
+//Make time series of water pixels as area in km² within region
+var ClassChart = ui.Chart.image.series({
+  imageCollection: s1.select('waterMask'),
+  region: aoi, //PL Nature Reserve 
+  reducer: ee.Reducer.sum(),
+  scale: 100, //by using this scale we are aggregating 10mx10m pixel of Sentinel-1 to a ~1kmx1km units for area calculation in km2
+})
+  .setOptions({
+      title: 'Flooded area delineated by the water mask, km2',
+      vAxis: {'title': 'area'},
+      lineWidth: 1.5,
+      pointSize: 2
+    });
+ClassChart.style().set({
+    position: 'bottom-right',
+    width: '492px',
+    height: '300px'
+  });
+
+// Add the chart to the map
+Map.add(ClassChart);
+
+
